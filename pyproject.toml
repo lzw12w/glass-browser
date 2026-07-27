@@ -1,0 +1,37 @@
+[project]
+name = "browser-agent"
+version = "0.1.0"
+description = "A conversational agent that operates web browsers via Playwright"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.40.0",
+    "playwright>=1.45.0",
+    "prompt_toolkit>=3.0.0",
+    "pyyaml>=6.0",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+# Optional OpenAI provider (Responses API + reasoning encrypted_content replay).
+# Only required when llm_provider = "openai".
+openai = [
+    "openai>=1.50.0",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+ba = "browser_agent.cli:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["browser_agent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
