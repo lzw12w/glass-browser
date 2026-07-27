@@ -3,13 +3,22 @@
 Responsibilities:
 - produce LLM-friendly page snapshots with stable interaction refs (e1, e2, ...)
 - resolve refs back to live locators for click / fill / press_key
+- targeted lookups (find_element / read_text) that avoid full-tree dumps
 - archive screenshots into the run workdir
 - buffer console messages and network responses for inspection tools
 
-Ref contract: every ``snapshot()`` call re-enumerates interactive elements and
-stamps them with a ``data-ba-ref`` attribute. Refs from an older snapshot
-generation are rejected with ``E_STALE_REF`` so the model is forced to
-re-observe instead of acting on a page that may have changed.
+Ref contract: every ``snapshot()`` re-enumerates interactive elements and
+stamps them with a ``data-ba-ref`` attribute, resetting the ref generation.
+Refs from an older generation are rejected with ``E_STALE_REF`` so the model
+re-observes instead of acting on a page that may have changed. ``find_element``
+adds refs to the CURRENT generation (additive, same page) so a targeted lookup
+yields an immediately-usable ref without a full snapshot.
+
+Frames: the snapshot JS traverses open shadow DOM (Playwright locators pierce
+it automatically). Cross-document iframes are handled by evaluating the same
+JS inside every child frame; each ref is mapped to its owning frame so
+``resolve_ref`` targets the right document — this is why refs must resolve via
+``self._ref_frames`` rather than a bare ``page.locator``.
 """
 from __future__ import annotations
 
@@ -17,33 +26,37 @@ import datetime as _dt
 import re
 from collections import deque
 from pathlib import Path
-from typing import Any, Optional
 
 from ..errors import BrowserUnavailable, InvalidArgument, StaleRef, TargetNotFound
 from .driver import BrowserDriver
 
 REF_ATTR = "data-ba-ref"
 
-# One page-side pass: clears old refs, walks the visible DOM, stamps
-# interactive elements, and returns a flattened salient-node tree. Wrapper
-# divs without semantic value are elided so the model sees content density,
-# not markup depth.
-_SNAPSHOT_JS = """
-() => {
+# One in-frame pass: clears old refs, walks the visible DOM (piercing open
+# shadow roots), stamps interactive elements, and returns a flattened
+# salient-node tree. Wrapper divs without semantic value are elided so the
+# model sees content density, not markup depth. ``box`` is intentionally NOT
+# emitted per node (it costs a lot of tokens and the model targets by ref, not
+# coordinates); ``describe_ref`` fetches geometry on demand.
+_SNAPSHOT_JS = r"""
+(startCounter) => {
   const INTERACTIVE_TAGS = new Set(['a','button','input','select','textarea','summary','option']);
   const INTERACTIVE_ROLES = new Set(['button','link','tab','checkbox','radio','menuitem',
-    'combobox','option','switch','searchbox','textbox','slider','spinbutton']);
+    'menuitemcheckbox','menuitemradio','combobox','option','switch','searchbox','textbox',
+    'slider','spinbutton']);
   const LANDMARK_TAGS = new Set(['nav','main','header','footer','form','aside','section',
     'table','thead','tbody','tr','ul','ol','li','dialog','details','fieldset','label']);
-  const SKIP_TAGS = new Set(['script','style','noscript','template','svg','path','meta','link','head']);
-  document.querySelectorAll('[data-ba-ref]').forEach(el => el.removeAttribute('data-ba-ref'));
-  let counter = 0;
+  const SKIP_TAGS = new Set(['script','style','noscript','template','svg','path','meta',
+    'link','head','iframe','frame']);
+  let counter = startCounter || 0;
   let totalNodes = 0;
-  let interactiveCount = 0;
 
+  const clearRoot = (root) => {
+    root.querySelectorAll('[data-ba-ref]').forEach(el => el.removeAttribute('data-ba-ref'));
+  };
   const isVisible = (el) => {
     const style = window.getComputedStyle(el);
-    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
     const rect = el.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
   };
@@ -63,25 +76,28 @@ _SNAPSHOT_JS = """
     for (const child of el.childNodes) {
       if (child.nodeType === Node.TEXT_NODE) t += child.textContent;
     }
-    return t.replace(/\\s+/g, ' ').trim();
+    return t.replace(/\s+/g, ' ').trim();
   };
   const accName = (el) =>
     el.getAttribute('aria-label') || el.getAttribute('alt') ||
     el.getAttribute('title') || el.getAttribute('placeholder') || '';
 
-  const walk = (el) => {
+  // Walk a root (element / shadowRoot / document.body). Returns salient nodes.
+  const walk = (root) => {
     const out = [];
-    if (totalNodes > 3000) return out;
-    for (const child of el.children) {
-      const tag = child.tagName.toLowerCase();
-      if (SKIP_TAGS.has(tag)) continue;
+    if (totalNodes > 4000) return out;
+    for (const child of root.children) {
+      const tag = child.tagName ? child.tagName.toLowerCase() : '';
+      if (!tag || SKIP_TAGS.has(tag)) continue;
       if (!isVisible(child)) continue;
       totalNodes++;
       const interactive = isInteractive(child);
       const text = ownText(child);
       const name = accName(child);
       const heading = /^h[1-6]$/.test(tag);
-      const kids = walk(child);
+      // Descend into light DOM children AND an open shadow root.
+      let kids = walk(child);
+      if (child.shadowRoot) kids = kids.concat(walk(child.shadowRoot));
       const salient = interactive || heading || text.length > 0;
       if (salient) {
         const node = { tag };
@@ -89,26 +105,30 @@ _SNAPSHOT_JS = """
           const ref = 'e' + (++counter);
           child.setAttribute('data-ba-ref', ref);
           node.ref = ref;
-          interactiveCount++;
-          const rect = child.getBoundingClientRect();
-          node.box = { x: Math.round(rect.x), y: Math.round(rect.y),
-                       width: Math.round(rect.width), height: Math.round(rect.height) };
-          if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+          if (tag === 'input' || tag === 'textarea') {
             const type = child.getAttribute('type');
             if (type) node.type = type;
             if (child.value) node.value = String(child.value).slice(0, 80);
             if (child.checked) node.checked = true;
-            if (child.disabled) node.disabled = true;
+          }
+          if (child.disabled) node.disabled = true;
+          if (tag === 'select') {
+            const opts = [];
+            for (const o of child.options || []) {
+              opts.push({ v: o.value, t: (o.textContent || '').trim().slice(0, 40),
+                          ...(o.selected ? { selected: true } : {}) });
+            }
+            if (opts.length) node.options = opts.slice(0, 30);
           }
         }
         const role = child.getAttribute('role');
         if (role) node.role = role;
         if (heading) node.heading = tag;
-        if (text) node.text = text.slice(0, 120);
+        if (text) node.text = text.slice(0, 200);
         if (name && name !== text) node.name = String(name).slice(0, 80);
         if (tag === 'a') {
           const href = child.getAttribute('href');
-          if (href && !href.startsWith('javascript:')) node.href = href.slice(0, 160);
+          if (href && !href.startsWith('javascript:')) node.href = href.slice(0, 200);
         }
         if (kids.length) node.children = kids;
         out.push(node);
@@ -121,14 +141,15 @@ _SNAPSHOT_JS = """
     return out;
   };
 
-  const tree = walk(document.body);
+  clearRoot(document);
+  const tree = walk(document.body || document.documentElement);
   return {
     tree,
+    nextCounter: counter,
     meta: {
       url: location.href,
       title: document.title,
       total_nodes: totalNodes,
-      interactive_count: interactiveCount,
     },
   };
 }
@@ -139,19 +160,30 @@ def _safe_filename_stem(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]+", "_", value).strip("_")[:80] or "page"
 
 
+def _collect_refs(nodes, out: set) -> None:
+    for n in nodes or []:
+        ref = n.get("ref")
+        if ref:
+            out.add(ref)
+        _collect_refs(n.get("children"), out)
+
+
 class BrowserSession:
     def __init__(self, driver: BrowserDriver, *, workdir: Path | None = None):
         self.driver = driver
         self.workdir = workdir
         self._page = None
-        # Refs valid for the CURRENT snapshot generation only.
+        # Refs valid for the CURRENT snapshot generation only, each mapped to
+        # the frame whose document holds it (so resolve_ref targets the right
+        # document — page.locator does not pierce iframes).
         self._known_refs: set[str] = set()
+        self._ref_frames: dict = {}
+        self._ref_counter: int = 0
         self._console: deque[dict] = deque(maxlen=400)
         self._responses: deque[dict] = deque(maxlen=600)
         self._wired_page_ids: set[int] = set()
         # Durable task list written by todo_write; read by the agent loop.
         self._todos: list[dict] = []
-        # Wire pages opened later (popups, window.open, new_tab).
         try:
             self.driver.context.on("page", self._wire_page)
         except BrowserUnavailable:
@@ -160,8 +192,6 @@ class BrowserSession:
     # ---- page management -----------------------------------------------
     @property
     def page(self):
-        """The active page. Falls back to the context's last page, creating
-        one when the context is empty (fresh launch)."""
         if self._page is not None and not self._page.is_closed():
             return self._page
         pages = self.driver.context.pages
@@ -170,7 +200,6 @@ class BrowserSession:
         return self._page
 
     def _wire_page(self, page) -> None:
-        """Attach console/network listeners once per page object."""
         if id(page) in self._wired_page_ids:
             return
         self._wired_page_ids.add(id(page))
@@ -199,42 +228,74 @@ class BrowserSession:
         page.on("console", on_console)
         page.on("response", on_response)
 
+    def _reset_refs(self) -> None:
+        self._known_refs = set()
+        self._ref_frames = {}
+        self._ref_counter = 0
+
     # ---- snapshot / refs -------------------------------------------------
     def snapshot(self) -> dict:
-        """Enumerate the visible DOM into an LLM-friendly tree with refs."""
+        """Enumerate the visible DOM (all frames, open shadow DOM) into an
+        LLM-friendly tree with refs. Resets the ref generation."""
         page = self.page
-        try:
-            raw = page.evaluate(_SNAPSHOT_JS)
-        except Exception as e:
-            raise BrowserUnavailable(f"snapshot failed: {e}") from e
-        tree = raw.get("tree") if isinstance(raw, dict) else None
-        meta = raw.get("meta") if isinstance(raw, dict) else {}
-        refs: set[str] = set()
+        frames = list(page.frames)
+        counter = 0
+        ref_frames: dict = {}
+        main_tree: list = []
+        main_meta: dict = {}
+        child_sections: list = []
+        total_nodes = 0
+        for frame in frames:
+            try:
+                raw = frame.evaluate(_SNAPSHOT_JS, counter)
+            except Exception:
+                # Detached frame, or a rare eval error — skip rather than fail
+                # the whole snapshot. Cross-origin frames still evaluate fine
+                # (Playwright runs JS inside each frame's own context).
+                continue
+            counter = raw.get("nextCounter", counter)
+            total_nodes += int(raw.get("meta", {}).get("total_nodes", 0) or 0)
+            refs: set = set()
+            _collect_refs(raw.get("tree"), refs)
+            for ref in refs:
+                ref_frames[ref] = frame
+            if frame is page.main_frame:
+                main_tree = raw.get("tree", [])
+                main_meta = raw.get("meta", {})
+            elif raw.get("tree"):
+                child_sections.append({
+                    "url": raw.get("meta", {}).get("url", ""),
+                    "tree": raw["tree"],
+                })
 
-        def collect(nodes):
-            for n in nodes or []:
-                ref = n.get("ref")
-                if ref:
-                    refs.add(ref)
-                collect(n.get("children"))
-
-        collect(tree)
-        self._known_refs = refs
-        meta = dict(meta or {})
+        self._known_refs = set(ref_frames)
+        self._ref_frames = ref_frames
+        self._ref_counter = counter
+        meta = dict(main_meta)
+        meta["total_nodes"] = total_nodes
+        meta["interactive_count"] = len(ref_frames)
         meta["tab_count"] = len(self.driver.context.pages)
-        return {"tree": tree or [], "_meta": meta}
+        meta["frame_count"] = len(frames)
+        out = {"tree": main_tree, "_meta": meta}
+        if child_sections:
+            out["frames"] = child_sections
+        return out
+
+    def _frame_for(self, ref: str):
+        return self._ref_frames.get(ref) or self.page.main_frame
 
     def resolve_ref(self, ref: str):
         """Return a live locator for ``ref``; raise structured errors on
         stale/unknown refs so the model knows to re-snapshot."""
-        if not isinstance(ref, str) or not re.fullmatch(r"e\d{1,5}", ref or ""):
+        if not isinstance(ref, str) or not re.fullmatch(r"e\d{1,6}", ref or ""):
             raise InvalidArgument(f"malformed ref: {ref!r} (expected e.g. 'e12')")
         if ref not in self._known_refs:
             raise StaleRef(
                 f"ref {ref} does not belong to the current snapshot; "
                 "call browser_snapshot to re-observe the page"
             )
-        locator = self.page.locator(f'[{REF_ATTR}="{ref}"]')
+        frame = self._frame_for(ref)
+        locator = frame.locator(f'[{REF_ATTR}="{ref}"]')
         if locator.count() == 0:
             raise TargetNotFound(
                 f"element for ref {ref} is gone (page changed since snapshot); "
@@ -243,7 +304,8 @@ class BrowserSession:
         return locator.first
 
     def describe_ref(self, ref: str) -> dict:
-        """Small element descriptor echoed back in action results."""
+        """Small element descriptor (incl. box geometry) echoed back in
+        action results."""
         locator = self.resolve_ref(ref)
         try:
             info = locator.evaluate(
@@ -271,16 +333,101 @@ class BrowserSession:
                 out["box"] = info["box"]
         return out
 
-    # ---- navigation ------------------------------------------------------
-    def navigate(self, url: str, *, timeout_ms: int = 15000) -> dict:
+    # ---- targeted lookups (cheap alternatives to a full snapshot) --------
+    def find_elements(self, *, text: str | None = None, selector: str | None = None,
+                      role: str | None = None, name: str | None = None,
+                      limit: int = 5) -> dict:
+        """Locate up to ``limit`` elements by text / CSS selector / ARIA role
+        and return them with FRESH refs added to the current generation, so
+        the model can act on a match without dumping the whole tree.
+
+        Refs are stamped into the main-frame document; shadow DOM is pierced
+        automatically by Playwright locators.
+        """
         page = self.page
-        # ``load`` over ``networkidle``: SPAs with polling never go idle.
-        resp = page.goto(url, wait_until="load", timeout=timeout_ms)
+        if selector:
+            locator = page.locator(selector)
+        elif role:
+            locator = page.get_by_role(role, name=name) if name else page.get_by_role(role)
+        elif text:
+            locator = page.get_by_text(text, exact=False)
+        else:
+            raise InvalidArgument("find_element needs text, selector, or role")
+
+        try:
+            total = locator.count()
+        except Exception as e:
+            raise InvalidArgument(f"bad locator: {e}") from e
+        take = min(total, max(1, min(limit, 20)))
+        results: list[dict] = []
+        for i in range(take):
+            el = locator.nth(i)
+            self._ref_counter += 1
+            ref = f"e{self._ref_counter}"
+            try:
+                info = el.evaluate(
+                    """(node, ref) => {
+                        node.setAttribute('data-ba-ref', ref);
+                        const rect = node.getBoundingClientRect();
+                        return {
+                            tag: node.tagName.toLowerCase(),
+                            role: node.getAttribute('role') || '',
+                            text: (node.innerText || node.value || '').trim().slice(0, 120),
+                            name: (node.getAttribute('aria-label') || node.getAttribute('title') ||
+                                   node.getAttribute('placeholder') || '').slice(0, 80),
+                            visible: rect.width > 0 && rect.height > 0,
+                        };
+                    }""",
+                    ref,
+                )
+            except Exception:
+                continue
+            self._known_refs.add(ref)
+            self._ref_frames[ref] = page.main_frame
+            entry = {"ref": ref}
+            for key in ("tag", "role", "text", "name"):
+                if info.get(key):
+                    entry[key] = info[key]
+            if info.get("visible") is False:
+                entry["visible"] = False
+            results.append(entry)
+        return {"count": total, "returned": len(results), "results": results}
+
+    def read_text(self, *, selector: str | None = None, ref: str | None = None,
+                  limit: int = 20) -> dict:
+        """Return visible text of matching elements — read-only, no ref
+        stamping. The cheapest way to extract an answer/value from the page."""
+        if ref:
+            locator = self.resolve_ref(ref)
+            texts = [locator.inner_text()]
+        elif selector:
+            locator = self.page.locator(selector)
+            count = locator.count()
+            texts = [locator.nth(i).inner_text()
+                     for i in range(min(count, max(1, min(limit, 50))))]
+        else:
+            raise InvalidArgument("read_text needs `selector` or `ref`")
+        cleaned = [re.sub(r"\s+\n", "\n", t).strip()[:2000] for t in texts if t and t.strip()]
+        return {"count": len(cleaned), "texts": cleaned}
+
+    # ---- navigation ------------------------------------------------------
+    def navigate(self, url: str, *, timeout_ms: int = 20000) -> dict:
+        page = self.page
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        self.settle()
         return {
             "url": page.url,
             "title": page.title(),
             "status": resp.status if resp is not None else None,
         }
+
+    def settle(self, *, timeout_ms: int = 3000) -> None:
+        """Give an in-flight navigation/XHR burst a brief chance to finish.
+        Never raises — SPAs that keep polling never fully idle and that's OK."""
+        try:
+            self.page.wait_for_load_state("networkidle", timeout=timeout_ms)
+        except Exception:
+            pass
 
     def location(self) -> dict:
         page = self.page
@@ -319,17 +466,17 @@ class BrowserSession:
         self._page = pages[index]
         self._wire_page(self._page)
         self._page.bring_to_front()
-        # Refs belong to the previously active page's snapshot.
-        self._known_refs = set()
+        self._reset_refs()
         return {"active_index": index, "url": self._page.url, "title": self._page.title()}
 
     def new_tab(self, url: str | None = None) -> dict:
         page = self.driver.context.new_page()
         self._page = page
         self._wire_page(page)
-        self._known_refs = set()
+        self._reset_refs()
         if url:
-            page.goto(url, wait_until="load")
+            page.goto(url, wait_until="domcontentloaded")
+            self.settle()
         return {"active_index": len(self.driver.context.pages) - 1,
                 "url": page.url, "title": page.title()}
 
@@ -343,7 +490,7 @@ class BrowserSession:
             raise InvalidArgument(f"tab index {index} out of range (0..{len(pages) - 1})")
         target.close()
         self._page = None
-        self._known_refs = set()
+        self._reset_refs()
         remaining = self.driver.context.pages
         return {"count": len(remaining)}
 

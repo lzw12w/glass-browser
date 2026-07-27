@@ -23,6 +23,67 @@ class BrowserSnapshotAction(Action):
         return session.snapshot()
 
 
+class FindElementAction(Action):
+    name = "find_element"
+    description = (
+        "Locate up to `limit` elements by visible `text`, CSS `selector`, or "
+        "ARIA `role` (+optional accessible `name`) and get them back with "
+        "fresh refs you can act on immediately — WITHOUT dumping the whole "
+        "page. Prefer this over a full browser_snapshot when you already know "
+        "what you're looking for (a named button, a search box). Refs join the "
+        "current snapshot generation."
+    )
+    idempotent = True
+    schema = {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "Visible text substring to match."},
+            "selector": {"type": "string", "description": "CSS selector."},
+            "role": {"type": "string", "description": "ARIA role, e.g. 'button', 'link', 'textbox'."},
+            "name": {"type": "string", "description": "Accessible name to pair with `role`."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+        },
+    }
+
+    def _execute(self, session, *, text: str | None = None, selector: str | None = None,
+                 role: str | None = None, name: str | None = None, limit: int = 5):
+        if not any([text, selector, role]):
+            return ActionResult(ok=False, error={
+                "error": "E_INVALID_ARG",
+                "message": "find_element needs `text`, `selector`, or `role`",
+            })
+        return session.find_elements(
+            text=text, selector=selector, role=role, name=name, limit=limit)
+
+
+class ReadTextAction(Action):
+    name = "read_text"
+    description = (
+        "Return the visible text of elements matching a CSS `selector` (or a "
+        "single `ref`). Read-only, no refs stamped — the cheapest way to "
+        "extract an answer/value from the page (a price, a headline, a table "
+        "cell) without a full snapshot."
+    )
+    idempotent = True
+    schema = {
+        "type": "object",
+        "properties": {
+            "selector": {"type": "string", "description": "CSS selector to read text from."},
+            "ref": {"type": "string", "description": "A ref from the current snapshot."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+        },
+    }
+
+    def _execute(self, session, *, selector: str | None = None,
+                 ref: str | None = None, limit: int = 20):
+        if not selector and not ref:
+            return ActionResult(ok=False, error={
+                "error": "E_INVALID_ARG",
+                "message": "read_text needs `selector` or `ref`",
+            })
+        return session.read_text(selector=selector, ref=ref, limit=limit)
+
+
 class ScreenshotAction(Action):
     name = "screenshot"
     description = (

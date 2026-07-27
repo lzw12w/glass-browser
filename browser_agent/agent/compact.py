@@ -351,7 +351,14 @@ def _brief_success_result(action_name: str, content: Any) -> str:
                 parts.append(f"{key}={meta.get(key)}")
         return "; ".join(parts)
 
-    if action_name in ("click", "fill", "press_key") and isinstance(data, dict):
+    if action_name == "read_text" and isinstance(data, dict):
+        texts = data.get("texts")
+        if isinstance(texts, list) and texts:
+            joined = " | ".join(str(t) for t in texts[:3])
+            return f"count={data.get('count')}; {joined[:160]}"
+        return f"count={data.get('count')}"
+
+    if action_name in ("click", "fill", "press_key", "select_option", "hover") and isinstance(data, dict):
         parts: list[str] = []
         element = data.get("element")
         if isinstance(element, dict):

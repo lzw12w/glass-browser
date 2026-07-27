@@ -1,16 +1,8 @@
-"""UI-mutating actions: navigate, click, fill, press_key, scroll, back, tabs."""
+"""UI-mutating actions: navigate, click, fill, select_option, hover,
+press_key, scroll, back, tabs."""
 from __future__ import annotations
 
 from .base import Action, ActionResult
-
-
-def _settle(page, *, timeout_ms: int = 5000) -> None:
-    """Give an in-flight navigation a chance to finish. Never raises —
-    pages that keep polling never reach a fully idle state and that's fine."""
-    try:
-        page.wait_for_load_state("load", timeout=timeout_ms)
-    except Exception:
-        pass
 
 
 class NavigateAction(Action):
@@ -60,7 +52,7 @@ class ClickAction(Action):
         url_before = page.url
         locator = session.resolve_ref(ref)
         locator.click(timeout=5000)
-        _settle(page)
+        session.settle()
         url_after = page.url
         data = {
             "element": element,
@@ -98,13 +90,72 @@ class FillAction(Action):
         locator.fill(text, timeout=5000)
         if submit:
             locator.press("Enter")
-            _settle(session.page)
+            session.settle()
         return {
             "element": element,
             "value": text[:200],
             "submitted": bool(submit),
             "url": session.page.url,
         }
+
+
+class SelectOptionAction(Action):
+    name = "select_option"
+    description = (
+        "Choose an option in a <select> dropdown identified by `ref` from the "
+        "latest browser_snapshot. Match by visible `label` or by `value` "
+        "(the snapshot lists a select's options with their v/t). Use this "
+        "instead of click for native dropdowns."
+    )
+    mutates_ui = True
+    schema = {
+        "type": "object",
+        "properties": {
+            "ref": {"type": "string", "description": "The <select> element's ref."},
+            "label": {"type": "string", "description": "Visible option text to select."},
+            "value": {"type": "string", "description": "Option value attribute to select."},
+        },
+        "required": ["ref"],
+    }
+
+    def _execute(self, session, *, ref: str, label: str | None = None,
+                 value: str | None = None):
+        if not label and not value:
+            return ActionResult(ok=False, error={
+                "error": "E_INVALID_ARG",
+                "message": "select_option needs `label` or `value`",
+            })
+        element = session.describe_ref(ref)
+        locator = session.resolve_ref(ref)
+        if value is not None:
+            chosen = locator.select_option(value=value, timeout=5000)
+        else:
+            chosen = locator.select_option(label=label, timeout=5000)
+        session.settle(timeout_ms=2000)
+        return {"element": element, "selected": chosen}
+
+
+class HoverAction(Action):
+    name = "hover"
+    description = (
+        "Move the pointer over the element identified by `ref` — reveals "
+        "hover menus / tooltips. Take a fresh browser_snapshot afterwards to "
+        "see any content that appeared."
+    )
+    mutates_ui = True
+    schema = {
+        "type": "object",
+        "properties": {
+            "ref": {"type": "string", "description": "Element ref from browser_snapshot."},
+        },
+        "required": ["ref"],
+    }
+
+    def _execute(self, session, *, ref: str):
+        element = session.describe_ref(ref)
+        session.resolve_ref(ref).hover(timeout=5000)
+        session.settle(timeout_ms=1500)
+        return {"element": element}
 
 
 class PressKeyAction(Action):
@@ -132,7 +183,7 @@ class PressKeyAction(Action):
         else:
             element = None
             session.page.keyboard.press(key)
-        _settle(session.page, timeout_ms=2000)
+        session.settle(timeout_ms=2000)
         data = {"key": key, "url": session.page.url}
         if element is not None:
             data["element"] = element

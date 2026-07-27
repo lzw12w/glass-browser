@@ -59,13 +59,15 @@ class FakeBrowserSession:
     def page(self):
         return self._page
 
+    def settle(self, *, timeout_ms: int = 3000):
+        pass
+
     def snapshot(self):
         self.snapshots += 1
         return {
             "tree": [
                 {"tag": "h1", "text": "Example"},
-                {"tag": "button", "ref": "e1", "text": "Go",
-                 "box": {"x": 10, "y": 20, "width": 80, "height": 30}},
+                {"tag": "button", "ref": "e1", "text": "Go"},
             ],
             "_meta": {"url": self._page.url, "title": "Example",
                       "total_nodes": 2, "interactive_count": 1, "tab_count": 1},

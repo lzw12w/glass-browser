@@ -3,12 +3,12 @@ from __future__ import annotations
 
 from .base import Action, ActionResult
 from .interact import (
-    BackAction, ClickAction, FillAction, NavigateAction, PressKeyAction,
-    ScrollAction, TabsAction,
+    BackAction, ClickAction, FillAction, HoverAction, NavigateAction,
+    PressKeyAction, ScrollAction, SelectOptionAction, TabsAction,
 )
 from .observe import (
-    BrowserSnapshotAction, ConsoleLogAction, NetworkLogAction,
-    ScreenshotAction, WaitForAction,
+    BrowserSnapshotAction, ConsoleLogAction, FindElementAction,
+    NetworkLogAction, ReadTextAction, ScreenshotAction, WaitForAction,
 )
 from .shell import RunShellAction, RunSkillCommandAction
 from .skill_actions import ListSkillsAction, SkillViewAction
@@ -16,9 +16,9 @@ from .todo import TodoWriteAction
 
 
 _CORE_ACTIONS: list[type[Action]] = [
-    BrowserSnapshotAction, ScreenshotAction,
-    NavigateAction, ClickAction, FillAction, PressKeyAction,
-    ScrollAction, BackAction, TabsAction,
+    BrowserSnapshotAction, FindElementAction, ReadTextAction, ScreenshotAction,
+    NavigateAction, ClickAction, FillAction, SelectOptionAction, HoverAction,
+    PressKeyAction, ScrollAction, BackAction, TabsAction,
     WaitForAction,
     ConsoleLogAction, NetworkLogAction,
     ListSkillsAction, SkillViewAction,
