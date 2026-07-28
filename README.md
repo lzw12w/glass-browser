@@ -1,5 +1,10 @@
 # GlassBrowser
 
+[![CI](https://github.com/lzw12w/glass-browser/actions/workflows/ci.yml/badge.svg)](https://github.com/lzw12w/glass-browser/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/glassbrowser)](https://pypi.org/project/glassbrowser/)
+[![Python](https://img.shields.io/pypi/pyversions/glassbrowser)](https://pypi.org/project/glassbrowser/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **An auditable, low-cost, DOM-only browser agent you can actually read and debug.**
 
 GlassBrowser drives a real Chromium (via Playwright) to complete natural-language
@@ -56,11 +61,12 @@ not a black box**.
 ## Quickstart
 
 ```bash
-pip install -e .              # core: Anthropic + any Anthropic-compatible endpoint
-# pip install -e ".[openai]"  # optional: OpenAI provider
-# pip install -e ".[dev]"     # optional: run the tests
+pip install glassbrowser              # core: Anthropic + any Anthropic-compatible endpoint
+# pip install "glassbrowser[openai]"  # optional: OpenAI provider
 playwright install chromium
 ```
+
+(For development: `git clone` → `pip install -e ".[openai,dev]"`.)
 
 Run it with whatever model you like — including cheap ones via an
 Anthropic-compatible endpoint:
