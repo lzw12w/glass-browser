@@ -38,15 +38,52 @@ can **run cheaply, embed, and debug** — and researchers who need to see exactl
 what the model saw and why it acted. The name is the promise: a **glass box,
 not a black box**.
 
+## Who is this for?
+
+- **Researchers studying browser-agent internals.** The whole kernel is ~5k
+  lines with strict layer boundaries — loop, perception, compaction, providers,
+  trace — each readable in one sitting. You can trace a click from prompt to
+  Playwright call in minutes, instead of spelunking a framework with tens of
+  thousands of lines.
+- **People betting on small models for agents.** The context-engineering layer
+  (see below) is the interesting part: it's what keeps a flash-tier model
+  viable on long multi-step tasks, and it's isolated enough to lift into your
+  own agent.
+- **Engineers who need to debug, embed, or self-host.** Full audit trace,
+  `pip install`, five objects to embed it as a library, no cloud dependency.
+
+## Context engineering: how cheap models survive long tasks
+
+The core design bet — and the part you won't find in most open-source agents —
+is a **three-layer context ladder**. Instead of letting history grow until an
+abrupt wholesale summarization (or a context overflow), information degrades
+*gradually*, each layer strictly cheaper than the last:
+
+| Layer | What happens | Information loss |
+|---|---|---|
+| **1 · Recent stays verbatim** | Only the most recent *N* `browser_snapshot` results stay in full; older ones collapse to one-line stubs (the page state they described is obsolete anyway) | None that matters — stale DOM is dead weight |
+| **2 · Lossless shrink** | Older tool results are structurally compressed (dedup, whitespace, boilerplate) with content preserved | Zero — reversible in spirit, every fact retained |
+| **3 · Model summary (last resort)** | Only when the window is genuinely about to overflow, old cycles are summarized by the model itself — reusing the same system prompt + tools so the request hits the provider's prompt cache | Bounded and explicit — the summary is logged in the trace like everything else |
+
+Everything is **KV-cache friendly**: layers rewrite the *tail* of history, not
+the head, so the provider's prompt cache keeps paying out turn after turn. This
+is why a flash-tier model (we develop against DeepSeek's) can run long
+multi-step tasks that would otherwise blow a small context window — the
+harness does the remembering, so the model doesn't have to.
+
+The implementation lives in `browser_agent/agent/compact.py` +
+`payload_compactor.py` and is deliberately self-contained — if you only steal
+one idea from this repo, steal this one.
+
 ## Highlights
 
 - **Auditable & resumable.** Every run writes `trace.jsonl` (full step log),
   `llm_context.jsonl` (the exact request sent each turn) and `messages.jsonl`
   (resume snapshot). You can always answer *"what did the model see, and why did
   it do that?"* — and continue a run with `--resume`.
-- **Low-cost by design.** Three-layer context compaction (recent-snapshot
-  elision → lossless Tier-1 shrink → model summary) keeps long tasks inside a
-  small context window, so cheap models stay viable.
+- **Low-cost by design.** A three-layer context ladder (recent-verbatim →
+  lossless shrink → model summary, [details above](#context-engineering-how-cheap-models-survive-long-tasks))
+  keeps long tasks inside a small context window, so cheap models stay viable.
 - **DOM-only perception.** A single in-page pass builds an LLM-friendly tree,
   stamps interactive elements with `data-ba-ref`, pierces open **shadow DOM**,
   descends into **iframes**, and lists `<select>` options — no pixels needed.
@@ -103,11 +140,14 @@ ba sessions                   # list resumable runs
   `select_option` / `press_key` all target refs. Cheaper still: `find_element`
   fetches just the element you want, and `read_text` extracts a value with no
   snapshot at all.
-- **Three-layer compaction.** Only the most recent *N* snapshots stay verbatim
-  in the LLM view; older tool results are losslessly shrunk (Tier 1), and a model
-  summary kicks in only when truly needed (Tier 2) — all KV-cache friendly.
+- **Three-layer compaction.** See [Context engineering](#context-engineering-how-cheap-models-survive-long-tasks)
+  above — recent snapshots stay verbatim, older history degrades gradually and
+  KV-cache-friendly instead of being summarized wholesale.
 - **Provider-agnostic kernel.** The loop never touches provider wire formats;
   each provider owns the shape of its own message history behind small hooks.
+
+The kernel is small on purpose — **~5k lines you can actually read**, with one
+responsibility per module:
 
 ```
 browser_agent/
