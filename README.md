@@ -1,8 +1,8 @@
-# Browser Agent
+# GlassBrowser
 
 **An auditable, low-cost, DOM-only browser agent you can actually read and debug.**
 
-Browser Agent drives a real Chromium (via Playwright) to complete natural-language
+GlassBrowser drives a real Chromium (via Playwright) to complete natural-language
 web tasks. It is built on a small (~5k line) provider-agnostic kernel: a
 `think → act → observe` loop, three-layer context compaction, and an append-only
 audit trace. It reasons over a compact **DOM snapshot** — **no screenshots
@@ -17,9 +17,9 @@ Anthropic- or OpenAI-compatible endpoint (DeepSeek, local gateways, …)
 
 Most capable browser agents lean on the **biggest model + vision + a hosted
 cloud**. That maximizes raw benchmark scores, but it's expensive, opaque, and
-hard to run yourself. Browser Agent makes the opposite bet:
+hard to run yourself. GlassBrowser makes the opposite bet:
 
-| | **Browser Agent** | Typical "max model + vision + cloud" agents |
+| | **GlassBrowser** | Typical "max model + vision + cloud" agents |
 |---|---|---|
 | Perception | Compact **DOM snapshot** (no vision) | DOM **+ screenshots** |
 | Cost | Runs on **cheap models** (long-task context compaction) | Needs a top-tier model |
@@ -30,7 +30,8 @@ hard to run yourself. Browser Agent makes the opposite bet:
 
 It won't top a vision-driven leaderboard. It's for people who want an agent they
 can **run cheaply, embed, and debug** — and researchers who need to see exactly
-what the model saw and why it acted.
+what the model saw and why it acted. The name is the promise: a **glass box,
+not a black box**.
 
 ## Highlights
 

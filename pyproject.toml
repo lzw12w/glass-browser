@@ -1,7 +1,7 @@
 [project]
-name = "browser-agent"
+name = "glassbrowser"
 version = "0.1.0"
-description = "A conversational agent that operates web browsers via Playwright"
+description = "An auditable, low-cost, DOM-only browser agent built on Playwright"
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.40.0",
