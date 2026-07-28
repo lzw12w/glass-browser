@@ -1,0 +1,42 @@
+name: Bug report
+description: Something broke or behaved incorrectly
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: >
+        Task prompt + target site (or a minimal HTML page), plus the command
+        you ran. The smaller the repro, the faster the fix.
+      placeholder: |
+        1. ba run "..." --url https://...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: trace
+    attributes:
+      label: Trace excerpt
+      description: >
+        The relevant steps from `runs/<id>/trace.jsonl` (and
+        `llm_context.jsonl` if the model made a strange decision).
+        **Redact anything sensitive first.**
+      render: json
+  - type: input
+    id: model
+    attributes:
+      label: Model / provider
+      placeholder: e.g. deepseek-v4-flash via Anthropic-compatible endpoint
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: e.g. macOS 15 / Python 3.12 / Playwright 1.49
