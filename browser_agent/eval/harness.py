@@ -76,7 +76,8 @@ def _token_f1(pred: str, gold: str) -> float:
 
 
 def _backend_id_of(session: BrowserSession, ref: str) -> str | None:
-    """Resolve a predicted ref to the element's Mind2Web backend_node_id."""
+    """Resolve a predicted ref to the element's Mind2Web backend_node_id
+    (for reporting only)."""
     try:
         locator = session.resolve_ref(ref)
     except BrowserAgentError:
@@ -87,12 +88,39 @@ def _backend_id_of(session: BrowserSession, ref: str) -> str | None:
         return None
 
 
-def _gold_is_covered(session: BrowserSession, gold: str) -> bool:
-    """Did our snapshot stamp a ref on the gold element (i.e. expose it as
-    actionable)? Pure perception-recall signal, independent of the model."""
+def _ref_matches_gold(session: BrowserSession, ref: str, gold: str) -> bool:
+    """Element accuracy with the standard web-agent relaxation: the model is
+    correct if it picked the gold node itself, OR the closest actionable
+    ancestor of the gold node (the icon-inside-a-button case — clicking the
+    button is the real action), OR a node nested inside the gold target."""
     try:
-        loc = session.page.locator(f'[backend_node_id="{gold}"][data-ba-ref]')
-        return loc.count() > 0
+        locator = session.resolve_ref(ref)
+    except BrowserAgentError:
+        return False
+    try:
+        return bool(locator.evaluate(
+            """(picked, gold) => {
+                const g = document.querySelector('[backend_node_id=\"' + gold + '\"]');
+                if (!g) return false;
+                if (picked === g) return true;
+                if (g.closest('[data-ba-ref]') === picked) return true;  // actionable ancestor
+                if (picked.closest('[backend_node_id=\"' + gold + '\"]')) return true;  // inside gold
+                return false;
+            }""", gold))
+    except Exception:
+        return False
+
+
+def _gold_is_covered(session: BrowserSession, gold: str) -> bool:
+    """Perception recall: did our snapshot make the gold target actionable —
+    either by stamping a ref on it directly OR on its closest ancestor (so a
+    click reaches it)? Independent of the model's choice."""
+    try:
+        return bool(session.page.evaluate(
+            """(gold) => {
+                const g = document.querySelector('[backend_node_id=\"' + gold + '\"]');
+                return !!(g && g.closest('[data-ba-ref]'));
+            }""", gold))
     except Exception:
         return False
 
@@ -109,7 +137,7 @@ def evaluate_step(session: BrowserSession, llm: LLMClient, step: Mind2WebStep) -
         prev_action_reprs=step.prev_action_reprs, snapshot=snapshot,
     )
     picked = _backend_id_of(session, pred.ref) if pred.ref else None
-    element_correct = picked is not None and str(picked) == str(step.gold_backend_node_id)
+    element_correct = bool(pred.ref) and _ref_matches_gold(session, pred.ref, step.gold_backend_node_id)
     op_correct = pred.action == step.op
     if step.op == "CLICK":
         value_f1 = 1.0 if op_correct else 0.0

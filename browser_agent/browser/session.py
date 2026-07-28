@@ -78,9 +78,17 @@ _SNAPSHOT_JS = r"""
     }
     return t.replace(/\s+/g, ' ').trim();
   };
+  const attr = (el, ...names) => {
+    for (const n of names) {
+      const v = el.getAttribute(n);
+      if (v) return v;
+    }
+    return '';
+  };
+  // Read both hyphen and underscore spellings: some pruned-HTML corpora
+  // (e.g. Mind2Web cleaned_html) normalize `aria-label` -> `aria_label`.
   const accName = (el) =>
-    el.getAttribute('aria-label') || el.getAttribute('alt') ||
-    el.getAttribute('title') || el.getAttribute('placeholder') || '';
+    attr(el, 'aria-label', 'aria_label', 'alt', 'title', 'placeholder');
 
   // Walk a root (element / shadowRoot / document.body). Returns salient nodes.
   const walk = (root) => {
@@ -126,6 +134,21 @@ _SNAPSHOT_JS = r"""
         if (heading) node.heading = tag;
         if (text) node.text = text.slice(0, 200);
         if (name && name !== text) node.name = String(name).slice(0, 80);
+        // Icon-only control (no text, no own accessible name): borrow a label
+        // from a descendant so the model can tell what it does (search vs
+        // calendar vs menu). Fires only for otherwise-anonymous interactive
+        // nodes, so the token cost is negligible.
+        if (interactive && !node.text && !node.name) {
+          const lbl = child.querySelector('[aria-label],[aria_label],[title],img[alt]');
+          let hint = lbl ? attr(lbl, 'aria-label', 'aria_label', 'title', 'alt') : '';
+          if (!hint) {
+            const cls = (child.getAttribute('class') || '').split(/\s+/).find(
+              c => /icon|search|menu|close|calendar|cart|nav|arrow|expand|toggle|filter|submit|next|prev/i.test(c));
+            if (cls) hint = cls;
+          }
+          if (!hint) hint = child.getAttribute('id') || '';
+          if (hint) node.name = String(hint).slice(0, 60);
+        }
         if (tag === 'a') {
           const href = child.getAttribute('href');
           if (href && !href.startsWith('javascript:')) node.href = href.slice(0, 200);
