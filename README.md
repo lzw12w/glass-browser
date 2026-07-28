@@ -135,6 +135,9 @@ the ceiling that end-to-end accuracy then builds on. This is a single-step,
 teacher-forced probe: it stresses perception and one-shot grounding, not the
 full multi-turn loop. (Multi-step benchmarks are on the roadmap.)
 
+Full methodology, metric definitions, offline fixture caching, and reference
+numbers: [docs/mind2web.md](docs/mind2web.md).
+
 ## Tests
 
 ```bash
@@ -144,13 +147,22 @@ pytest        # kernel regression + scripted e2e + real-Playwright smoke + eval 
 The Playwright smoke tests auto-skip when the Chromium binary is missing, so the
 kernel suite stays runnable on machines without a browser.
 
+## Examples
+
+[`examples/`](examples/) has two self-contained scripts:
+
+- `zero_key_scripted.py` — the full loop with **no API key** (scripted
+  provider): watch tools execute and the audit trace appear, for free.
+- `embed_agent.py` — embed the agent in your own Python code: five objects,
+  one `agent.chat(...)` call.
+
 ## Roadmap
 
 - **Multi-step benchmarks** (WebArena / Online-Mind2Web) to measure the full
   loop, not just single-step perception — *help wanted* (needs heavier infra).
 - **Optional vision channel** — the kernel keeps a dormant hook; DOM-only stays
   the default.
-- **More site skills** and a library-embedding example.
+- **More site skills.**
 
 ## License
 
