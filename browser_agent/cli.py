@@ -350,6 +350,115 @@ def _repl(agent: Agent, cfg: Config, workdir: Path, recorder: Recorder,
 # main
 # ---------------------------------------------------------------------------
 
+def cmd_eval(args, cfg, console):
+    """Offline Mind2Web action-prediction eval.
+
+    Streams a few tasks off HuggingFace (or reads a cached JSONL), replays each
+    step's cleaned_html through the real snapshot pipeline, asks the model for
+    one action, and scores element accuracy / operation F1 / step success —
+    plus a `coverage` diagnostic (did our snapshot even expose the gold
+    element as an actionable ref).
+    """
+    from .eval import mind2web as m2w
+    from .eval import harness as m2h
+
+    if args.source == "jsonl":
+        if not args.path:
+            console.print("[red]--path is required with --source jsonl[/red]")
+            return 2
+        steps = m2w.load_steps_from_jsonl(args.path, limit=args.limit)
+    else:
+        console.print(f"[dim]streaming up to {args.limit_tasks} tasks from HF shard {args.shard}…[/dim]")
+        steps = m2w.load_steps_from_hf(
+            limit_tasks=args.limit_tasks, shard=args.shard, max_steps=args.limit)
+    if not steps:
+        console.print("[red]no steps loaded[/red]")
+        return 1
+    console.print(f"[green]loaded {len(steps)} steps[/green]")
+
+    if args.dump_fixture:
+        path = m2w.dump_steps_to_jsonl(steps, args.dump_fixture)
+        console.print(f"[green]cached normalized steps -> {path}[/green]")
+        if args.dry_run:
+            return 0
+
+    if args.dry_run:
+        # Perception-only pass: no LLM, just report gold-element coverage.
+        cov = _coverage_only(steps, cfg, console, args)
+        console.print(Panel(f"coverage (gold exposed as ref): [bold]{cov:.1%}[/bold]  over {len(steps)} steps",
+                            title="mind2web dry-run"))
+        return 0
+
+    llm = _make_llm_for_cfg(cfg)
+    driver = BrowserDriver()
+    try:
+        driver.launch(headless=not args.headed)
+    except BrowserAgentError as e:
+        console.print(f"[red]browser unavailable: {e}[/red]")
+        return 1
+    try:
+        session = BrowserSession(driver)
+
+        def _tick(r):
+            mark = "✓" if r.step_success else ("○" if r.covered else "✕")
+            console.print(f"  {mark} {r.task_id[:8]} step {r.step_index} {r.op} "
+                          f"ele={'Y' if r.element_correct else 'n'} "
+                          f"cov={'Y' if r.covered else 'n'}"
+                          + (f" [red]{r.error}[/red]" if r.error else ""))
+
+        metrics = m2h.run(session, llm, steps, on_result=_tick)
+    finally:
+        driver.close()
+
+    tbl = Table(title="Mind2Web offline")
+    for col in ("metric", "value"):
+        tbl.add_column(col)
+    d = metrics.as_dict()
+    tbl.add_row("steps", str(d["n"]))
+    tbl.add_row("coverage (perception recall)", f"{d['coverage']:.1%}")
+    tbl.add_row("element accuracy", f"{d['element_acc']:.1%}")
+    tbl.add_row("operation F1", f"{d['op_f1']:.1%}")
+    tbl.add_row("step success rate", f"{d['step_sr']:.1%}")
+    console.print(tbl)
+
+    if args.out:
+        import json as _json
+        with open(args.out, "w", encoding="utf-8") as f:
+            _json.dump({"summary": d, "results": [
+                {"task_id": r.task_id, "step_index": r.step_index, "op": r.op,
+                 "gold": r.gold_backend_node_id, "picked": r.picked_backend_node_id,
+                 "ref": r.predicted.ref, "action": r.predicted.action,
+                 "covered": r.covered, "element_correct": r.element_correct,
+                 "step_success": r.step_success, "error": r.error}
+                for r in metrics.results]}, f, ensure_ascii=False, indent=2)
+        console.print(f"[green]wrote {args.out}[/green]")
+    return 0
+
+
+def _coverage_only(steps, cfg, console, args) -> float:
+    """Run the snapshot pipeline over every step WITHOUT an LLM and report the
+    fraction where the gold element got an actionable ref."""
+    from .eval import harness as m2h
+    driver = BrowserDriver()
+    try:
+        driver.launch(headless=not args.headed)
+    except BrowserAgentError as e:
+        console.print(f"[red]browser unavailable: {e}[/red]")
+        return 0.0
+    covered = 0
+    try:
+        session = BrowserSession(driver)
+        for step in steps:
+            session.page.set_content(step.cleaned_html, wait_until="domcontentloaded")
+            session._reset_refs()
+            session.snapshot()
+            if m2h._gold_is_covered(session, step.gold_backend_node_id):
+                covered += 1
+    finally:
+        driver.close()
+    return covered / (len(steps) or 1)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ba")
     sub = parser.add_subparsers(dest="cmd")
@@ -376,6 +485,25 @@ def main(argv: list[str] | None = None) -> int:
     pshow = psksub.add_parser("show", help="show one skill")
     pshow.add_argument("name")
 
+    pe = sub.add_parser("eval", help="offline benchmarks")
+    pesub = pe.add_subparsers(dest="eval_cmd")
+    pm = pesub.add_parser("mind2web", help="Mind2Web offline action-prediction eval")
+    pm.add_argument("--source", choices=["hf", "jsonl"], default="hf",
+                    help="stream from HuggingFace (default) or read a cached JSONL")
+    pm.add_argument("--path", help="JSONL path (with --source jsonl)")
+    pm.add_argument("--shard", type=int, default=0, help="HF train shard index (0-9)")
+    pm.add_argument("--limit-tasks", type=int, default=5, dest="limit_tasks",
+                    help="number of tasks to stream from HF")
+    pm.add_argument("--limit", type=int, default=None, help="cap total steps")
+    pm.add_argument("--provider", help="override llm_provider")
+    pm.add_argument("--model", help="override llm_model")
+    pm.add_argument("--headed", action="store_true", help="show the browser (default headless)")
+    pm.add_argument("--dry-run", action="store_true", dest="dry_run",
+                    help="perception-only: report gold-element coverage, no LLM calls")
+    pm.add_argument("--dump-fixture", dest="dump_fixture",
+                    help="write normalized steps to this JSONL and (with --dry-run) exit")
+    pm.add_argument("--out", help="write per-step results JSON here")
+
     args = parser.parse_args(argv)
     console = Console()
     cfg = Config.load()
@@ -392,6 +520,11 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_sessions(args, cfg, console)
     if args.cmd == "skills":
         return cmd_skills(args, cfg, console)
+    if args.cmd == "eval":
+        if getattr(args, "eval_cmd", None) == "mind2web":
+            return cmd_eval(args, cfg, console)
+        parser.print_help()
+        return 0
     parser.print_help()
     return 0
 
