@@ -90,6 +90,10 @@ _SNAPSHOT_JS = r"""
   const accName = (el) =>
     attr(el, 'aria-label', 'aria_label', 'alt', 'title', 'placeholder');
 
+  // True if any node in a produced subtree already carries a ref.
+  const hasRef = (nodes) =>
+    nodes.some(n => n.ref || (n.children && hasRef(n.children)));
+
   // Walk a root (element / shadowRoot / document.body). Returns salient nodes.
   const walk = (root) => {
     const out = [];
@@ -99,13 +103,21 @@ _SNAPSHOT_JS = r"""
       if (!tag || SKIP_TAGS.has(tag)) continue;
       if (!isVisible(child)) continue;
       totalNodes++;
-      const interactive = isInteractive(child);
       const text = ownText(child);
       const name = accName(child);
       const heading = /^h[1-6]$/.test(tag);
       // Descend into light DOM children AND an open shadow root.
       let kids = walk(child);
       if (child.shadowRoot) kids = kids.concat(walk(child.shadowRoot));
+      // A leaf list item with a short text label and no already-interactive
+      // child is very often a clickable option (custom dropdown / autocomplete
+      // / result row). Use innerText (the label frequently sits in a nested
+      // span, so ownText is empty), cap the length so big content blocks don't
+      // qualify, and require no interactive descendant so <li><a>..</a></li>
+      // nav isn't double-marked.
+      const liText = tag === 'li' ? (child.innerText || '').replace(/\s+/g, ' ').trim() : '';
+      const liClickable = tag === 'li' && liText.length > 0 && liText.length <= 100 && !hasRef(kids);
+      const interactive = isInteractive(child) || liClickable;
       const salient = interactive || heading || text.length > 0;
       if (salient) {
         const node = { tag };
@@ -133,6 +145,7 @@ _SNAPSHOT_JS = r"""
         if (role) node.role = role;
         if (heading) node.heading = tag;
         if (text) node.text = text.slice(0, 200);
+        else if (liClickable) node.text = liText.slice(0, 100);
         if (name && name !== text) node.name = String(name).slice(0, 80);
         // Icon-only control (no text, no own accessible name): borrow a label
         // from a descendant so the model can tell what it does (search vs
@@ -153,7 +166,7 @@ _SNAPSHOT_JS = r"""
           const href = child.getAttribute('href');
           if (href && !href.startsWith('javascript:')) node.href = href.slice(0, 200);
         }
-        if (kids.length) node.children = kids;
+        if (kids.length && !liClickable) node.children = kids;
         out.push(node);
       } else if (LANDMARK_TAGS.has(tag) && kids.length) {
         out.push({ tag, children: kids });

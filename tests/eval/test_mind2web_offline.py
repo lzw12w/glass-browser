@@ -75,6 +75,28 @@ def test_jsonl_roundtrip(tmp_path):
     assert back[0].gold_backend_node_id == "9" and back[0].goal == "goal"
 
 
+def test_zip_member_streaming_over_in_memory_zip():
+    """The test splits ship inside test.zip; verify the range-fetch + inflate
+    member reader against an in-memory zip (no network)."""
+    import io
+    import json
+    import zipfile
+
+    tasks = [{"annotation_id": f"t{i}", "actions": []} for i in range(4)]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("test_website/test_website_0.json", json.dumps(tasks))
+        zf.writestr("other.json", "[]")
+    raw = buf.getvalue()
+
+    def fetch(start, end):
+        return raw[start:end + 1]
+
+    got = list(m2w.iter_zip_member_objects(
+        fetch, len(raw), "test_website/test_website_0.json", limit=2))
+    assert [t["annotation_id"] for t in got] == ["t0", "t1"]
+
+
 # ---- end-to-end scoring (needs Chromium) ----------------------------------
 CLEANED = (
     '<div backend_node_id="1">'

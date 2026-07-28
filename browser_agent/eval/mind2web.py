@@ -13,16 +13,29 @@ so tests / repeat runs never hit the network.
 from __future__ import annotations
 
 import json
+import io
 import urllib.request
+import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Callable, Iterable, Iterator
 
-# Public HF resolve endpoint for the (ungated) text Mind2Web train shards.
-HF_TRAIN_URL = (
-    "https://huggingface.co/datasets/osunlp/Mind2Web/resolve/main/"
-    "data/train/train_{shard}.json"
-)
+_HF_ROOT = "https://huggingface.co/datasets/osunlp/Mind2Web/resolve/main/"
+# Train shards live as loose JSON files; the three official TEST splits are
+# packed inside a single test.zip (streamed member-by-member below).
+HF_TRAIN_URL = _HF_ROOT + "data/train/train_{shard}.json"
+HF_TEST_ZIP_URL = _HF_ROOT + "test.zip"
+
+# split name -> (shard count, member path template inside test.zip)
+TEST_SPLITS = {
+    "test_task": (3, "test_task/test_task_{shard}.json"),
+    "test_website": (2, "test_website/test_website_{shard}.json"),
+    "test_domain": (10, "test_domain/test_domain_{shard}.json"),
+}
+# OSU-NLP deliberately password-protects the held-out test set to guard against
+# contamination; the password is public (their GitHub: "unzip with password
+# mind2web"). It's ZipCrypto, which the stdlib zipfile can decrypt inline.
+TEST_ZIP_PASSWORD = b"mind2web"
 
 VALID_OPS = {"CLICK", "TYPE", "SELECT"}
 
@@ -170,16 +183,125 @@ def stream_tasks_from_url(url: str, *, limit: int, timeout: int = 60,
         resp.close()
 
 
-def load_steps_from_hf(*, limit_tasks: int = 5, shard: int = 0,
+def load_steps_from_hf(*, split: str = "train", limit_tasks: int = 5, shard: int = 0,
                        max_steps: int | None = None) -> list[Mind2WebStep]:
-    """Stream ``limit_tasks`` tasks off HF and normalize them into steps."""
-    url = HF_TRAIN_URL.format(shard=shard)
+    """Stream ``limit_tasks`` tasks off HF and normalize them into steps.
+
+    ``split`` = ``train`` (loose JSON shard, the dev source) or one of the
+    official held-out test splits ``test_task`` / ``test_website`` /
+    ``test_domain`` (streamed out of test.zip). Report numbers on a test
+    split; iterate on train to avoid overfitting the benchmark.
+    """
+    if split == "train":
+        tasks = stream_tasks_from_url(HF_TRAIN_URL.format(shard=shard), limit=limit_tasks)
+    elif split in TEST_SPLITS:
+        n_shards, member_tpl = TEST_SPLITS[split]
+        if not 0 <= shard < n_shards:
+            raise ValueError(f"{split} has shards 0..{n_shards - 1}, got {shard}")
+        tasks = stream_tasks_from_zip_url(
+            HF_TEST_ZIP_URL, member_tpl.format(shard=shard), limit=limit_tasks,
+            password=TEST_ZIP_PASSWORD)
+    else:
+        raise ValueError(f"unknown split {split!r}; expected 'train' or one of {sorted(TEST_SPLITS)}")
     steps: list[Mind2WebStep] = []
-    for task in stream_tasks_from_url(url, limit=limit_tasks):
+    for task in tasks:
         steps.extend(normalize_task(task))
         if max_steps is not None and len(steps) >= max_steps:
             return steps[:max_steps]
     return steps
+
+
+# ---- remote ZIP member streaming (test splits) -----------------------------
+# The three test splits ship inside a 567 MB test.zip. Rather than download it
+# whole, we back a seekable file object with HTTP Range requests and hand it to
+# the stdlib ``zipfile`` (which reads only the central directory + the one
+# member we open). Reads are block-buffered so a member's prefix costs a
+# handful of requests, and we stop after ``limit`` tasks. The byte fetcher is
+# injectable so this is unit-testable against an in-memory zip (no network).
+RangeFetcher = Callable[[int, int], bytes]
+
+
+class _RangeFile(io.RawIOBase):
+    """Read-only seekable file served by an (inclusive) byte-range fetcher,
+    with a read-ahead buffer to keep the request count low."""
+
+    def __init__(self, fetch: RangeFetcher, size: int, block: int = 1 << 20):
+        self._fetch = fetch
+        self._size = size
+        self._block = block
+        self._pos = 0
+        self._buf = b""
+        self._buf_start = 0
+
+    def seekable(self) -> bool:
+        return True
+
+    def readable(self) -> bool:
+        return True
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        if whence == 0:
+            self._pos = offset
+        elif whence == 1:
+            self._pos += offset
+        elif whence == 2:
+            self._pos = self._size + offset
+        return self._pos
+
+    def tell(self) -> int:
+        return self._pos
+
+    def read(self, n: int = -1) -> bytes:
+        if n is None or n < 0:
+            n = self._size - self._pos
+        end = min(self._pos + n, self._size)
+        if end <= self._pos:
+            return b""
+        if not (self._buf_start <= self._pos and end <= self._buf_start + len(self._buf)):
+            fetch_end = min(max(end, self._pos + self._block), self._size)
+            self._buf = self._fetch(self._pos, fetch_end - 1)
+            self._buf_start = self._pos
+        lo = self._pos - self._buf_start
+        data = self._buf[lo:lo + (end - self._pos)]
+        self._pos = end
+        return bytes(data)
+
+
+def iter_zip_member_objects(fetch_range: RangeFetcher, size: int, member: str,
+                            *, limit: int, chunk: int = 1 << 16,
+                            password: bytes | None = None) -> Iterator[dict]:
+    zf = zipfile.ZipFile(_RangeFile(fetch_range, size))
+    if member not in zf.namelist():
+        raise KeyError(f"member {member!r} not in zip; have {len(zf.namelist())} entries")
+    if password:
+        zf.setpassword(password)
+    with zf.open(member) as fp:
+        def _chunks() -> Iterator[bytes]:
+            while True:
+                block = fp.read(chunk)
+                if not block:
+                    return
+                yield block
+        yield from _iter_array_objects(_chunks(), limit=limit)
+
+
+def _http_range_fetcher(url: str, *, timeout: int = 60) -> tuple[RangeFetcher, int]:
+    head = urllib.request.Request(url, method="HEAD",
+                                  headers={"User-Agent": "browser-agent-eval"})
+    size = int(urllib.request.urlopen(head, timeout=timeout).headers["Content-Length"])
+
+    def fetch(start: int, end: int) -> bytes:
+        req = urllib.request.Request(url, headers={
+            "Range": f"bytes={start}-{end}", "User-Agent": "browser-agent-eval"})
+        return urllib.request.urlopen(req, timeout=timeout).read()
+
+    return fetch, size
+
+
+def stream_tasks_from_zip_url(url: str, member: str, *, limit: int,
+                             password: bytes | None = None) -> Iterator[dict]:
+    fetch, size = _http_range_fetcher(url)
+    yield from iter_zip_member_objects(fetch, size, member, limit=limit, password=password)
 
 
 # ---- JSONL cache (offline / tests) -----------------------------------------

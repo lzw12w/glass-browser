@@ -368,9 +368,10 @@ def cmd_eval(args, cfg, console):
             return 2
         steps = m2w.load_steps_from_jsonl(args.path, limit=args.limit)
     else:
-        console.print(f"[dim]streaming up to {args.limit_tasks} tasks from HF shard {args.shard}…[/dim]")
+        console.print(f"[dim]streaming up to {args.limit_tasks} tasks from HF {args.split} shard {args.shard}…[/dim]")
         steps = m2w.load_steps_from_hf(
-            limit_tasks=args.limit_tasks, shard=args.shard, max_steps=args.limit)
+            split=args.split, limit_tasks=args.limit_tasks, shard=args.shard,
+            max_steps=args.limit)
     if not steps:
         console.print("[red]no steps loaded[/red]")
         return 1
@@ -490,8 +491,11 @@ def main(argv: list[str] | None = None) -> int:
     pm = pesub.add_parser("mind2web", help="Mind2Web offline action-prediction eval")
     pm.add_argument("--source", choices=["hf", "jsonl"], default="hf",
                     help="stream from HuggingFace (default) or read a cached JSONL")
+    pm.add_argument("--split", default="train",
+                    choices=["train", "test_task", "test_website", "test_domain"],
+                    help="HF split: train (dev/iteration) or a held-out test split (reporting)")
     pm.add_argument("--path", help="JSONL path (with --source jsonl)")
-    pm.add_argument("--shard", type=int, default=0, help="HF train shard index (0-9)")
+    pm.add_argument("--shard", type=int, default=0, help="shard index within the split")
     pm.add_argument("--limit-tasks", type=int, default=5, dest="limit_tasks",
                     help="number of tasks to stream from HF")
     pm.add_argument("--limit", type=int, default=None, help="cap total steps")
