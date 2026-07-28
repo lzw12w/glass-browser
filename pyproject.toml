@@ -2,6 +2,19 @@
 name = "glassbrowser"
 version = "0.1.0"
 description = "An auditable, low-cost, DOM-only browser agent built on Playwright"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["browser-agent", "llm", "playwright", "web-automation", "ai-agent", "dom"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP :: Browsers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.40.0",
@@ -24,8 +37,13 @@ dev = [
 [project.scripts]
 ba = "browser_agent.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/lzw12w/glass-browser"
+Repository = "https://github.com/lzw12w/glass-browser"
+Issues = "https://github.com/lzw12w/glass-browser/issues"
+
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
