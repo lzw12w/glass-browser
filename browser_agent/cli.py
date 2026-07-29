@@ -6,6 +6,7 @@ Usage:
     ba chat --cdp http://127.0.0.1:9222   # attach to a running Chrome
     ba tools               # list available tools
     ba sessions            # list resumable runs
+    ba trace <run>         # pretty-print a run's audit trace as a timeline
     ba skills list         # list local skills
 """
 from __future__ import annotations
@@ -460,6 +461,30 @@ def _coverage_only(steps, cfg, console, args) -> float:
     return covered / (len(steps) or 1)
 
 
+def cmd_trace(args, cfg, console):
+    from .trace import pretty
+
+    try:
+        trace_path = pretty.resolve_trace_path(args.target, cfg.workdir_root)
+    except FileNotFoundError as e:
+        console.print(f"[red]{e}[/red]")
+        return 1
+    parsed = pretty.read_events(trace_path)
+    llm_events = None
+    if getattr(args, "llm", False):
+        llm_path = trace_path.parent / "llm_context.jsonl"
+        if llm_path.is_file():
+            llm_events = pretty.read_events(llm_path).events
+        else:
+            console.print("[dim]no llm_context.jsonl next to the trace[/dim]")
+    rows = pretty.build_rows(parsed.events, llm_events)
+    if not rows:
+        console.print("[dim]trace is empty[/dim]")
+        return 0
+    pretty.render(console, rows, bad_lines=parsed.bad_lines, source=trace_path)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ba")
     sub = parser.add_subparsers(dest="cmd")
@@ -479,6 +504,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="skip confirmation prompts for high-risk tools")
 
     sub.add_parser("tools", help="list available tools")
+    pt = sub.add_parser("trace", help="pretty-print a run's audit trace as a timeline")
+    pt.add_argument("target",
+                    help="run name under the runs root, a run workdir, "
+                         "or a raw trace.jsonl path")
+    pt.add_argument("--llm", action="store_true",
+                    help="interleave llm_context.jsonl entries (model, step, "
+                         "message count) into the timeline")
     sub.add_parser("sessions", help="list resumable runs (chat --resume targets)")
     psks = sub.add_parser("skills", help="list or inspect local skills")
     psksub = psks.add_subparsers(dest="skills_cmd")
@@ -520,6 +552,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_chat(args, cfg, console)
     if args.cmd == "tools":
         return cmd_tools(args, cfg, console)
+    if args.cmd == "trace":
+        return cmd_trace(args, cfg, console)
     if args.cmd == "sessions":
         return cmd_sessions(args, cfg, console)
     if args.cmd == "skills":
