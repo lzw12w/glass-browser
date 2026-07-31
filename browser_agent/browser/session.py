@@ -128,6 +128,14 @@ _SNAPSHOT_JS = r"""
           if (tag === 'input' || tag === 'textarea') {
             const type = child.getAttribute('type');
             if (type) node.type = type;
+            const formats = {
+              date: 'yyyy-mm-dd',
+              time: 'hh:mm[:ss[.sss]]',
+              'datetime-local': 'yyyy-mm-ddThh:mm[:ss[.sss]]',
+              month: 'yyyy-mm',
+              week: 'yyyy-Www',
+            };
+            if (type && formats[type]) node.format = formats[type];
             if (child.value) node.value = String(child.value).slice(0, 80);
             if (child.checked) node.checked = true;
           }
@@ -143,6 +151,9 @@ _SNAPSHOT_JS = r"""
         }
         const role = child.getAttribute('role');
         if (role) node.role = role;
+        if (role === 'combobox' && child.hasAttribute('aria-expanded')) {
+          node.expanded = child.getAttribute('aria-expanded') === 'true';
+        }
         if (heading) node.heading = tag;
         if (text) node.text = text.slice(0, 200);
         else if (liClickable) node.text = liText.slice(0, 100);
