@@ -17,6 +17,9 @@ PAGE = """
 <body>
   <h1>Smoke Page</h1>
   <input id="name" placeholder="your name">
+  <input id="meeting-date" type="date">
+  <input id="meeting-time" type="time">
+  <input id="city" role="combobox" aria-expanded="false" aria-controls="cities">
   <button id="go" onclick="
       document.getElementById('out').textContent =
           'hello ' + document.getElementById('name').value;
@@ -107,6 +110,17 @@ def test_snapshot_lists_select_options(session):
     assert "Apple" in labels and "Banana" in labels
     session.resolve_ref(sel["ref"]).select_option(label="Banana")
     assert session.read_text(ref=sel["ref"]) is not None
+
+
+def test_snapshot_annotates_date_time_and_combobox_inputs(session):
+    snap = session.snapshot()
+    date_input = _find(snap["tree"], tag="input", type="date")
+    time_input = _find(snap["tree"], tag="input", type="time")
+    combo = _find(snap["tree"], role="combobox")
+
+    assert date_input and date_input["format"] == "yyyy-mm-dd"
+    assert time_input and time_input["format"] == "hh:mm[:ss[.sss]]"
+    assert combo and combo["expanded"] is False
 
 
 def test_find_element_returns_usable_ref(session):
